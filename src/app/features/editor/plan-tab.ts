@@ -153,7 +153,7 @@ export class PlanTab {
   cycleAvailability(j: number, drv: Driver): void {
     const [from, to] = stintRealRange(this.draft()!, this.plan()!, j);
     setAvailability(drv, from, to, NEXT_STATUS[this.avail()[j][this.draft()!.drivers.indexOf(drv)]]);
-    this.store.touch(false);
+    this.store.availabilityChanged(drv);
   }
 
   overrideChanged(): void {

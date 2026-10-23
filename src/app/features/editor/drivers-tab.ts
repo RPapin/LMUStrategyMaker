@@ -25,6 +25,17 @@ import { startEpoch, toLocalInput } from '../../core/util';
             <input type="color" [(ngModel)]="drv.color" />
             <input [(ngModel)]="drv.name" style="font-weight: 600; width: 220px" />
             <label class="field inline"><input type="checkbox" [(ngModel)]="drv.canSpot" /> Can spot</label>
+            @if (store.isCloud()) {
+              <label class="field inline">
+                Team member
+                <select [ngModel]="store.links()[drv.id] ?? null" (ngModelChange)="store.linkDriver(drv.id, $event)">
+                  <option [ngValue]="null">— not linked —</option>
+                  @for (m of store.members(); track m.user_id) {
+                    <option [ngValue]="m.user_id">{{ m.display_name }}</option>
+                  }
+                </select>
+              </label>
+            }
             <span class="spacer"></span>
             <button class="btn sm danger" (click)="remove(drv)">Remove</button>
           </div>
@@ -52,7 +63,7 @@ import { startEpoch, toLocalInput } from '../../core/util';
           </div>
           @for (w of drv.availability; track $index) {
             <div class="row" style="margin-bottom: 6px">
-              <select [ngModel]="w.status" (ngModelChange)="w.status = $event">
+              <select [ngModel]="w.status" (ngModelChange)="w.status = $event; store.availabilityChanged(drv)">
                 <option value="unavailable">Unavailable</option>
                 <option value="preferred">Preferred</option>
               </select>
@@ -95,12 +106,12 @@ export class DriversTab {
     const start = startEpoch(this.draft()!.race.startTime);
     const from = drv.availability.length ? drv.availability[drv.availability.length - 1].to : start;
     drv.availability.push({ from, to: from + 2 * 3600_000, status: 'unavailable' });
-    this.store.touch();
+    this.store.availabilityChanged(drv);
   }
 
   removeWindow(drv: Driver, w: AvailabilityWindow): void {
     drv.availability = drv.availability.filter((x) => x !== w);
-    this.store.touch();
+    this.store.availabilityChanged(drv);
   }
 
   setFrom(drv: Driver, w: AvailabilityWindow, v: string): void {
@@ -117,6 +128,6 @@ export class DriversTab {
   private replace(drv: Driver, w: AvailabilityWindow, from: number, to: number): void {
     drv.availability = drv.availability.filter((x) => x !== w);
     setAvailability(drv, from, to, w.status);
-    this.store.touch();
+    this.store.availabilityChanged(drv);
   }
 }
