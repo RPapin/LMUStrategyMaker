@@ -1,0 +1,279 @@
+@if (plan(); as p) {
+  @if (draft(); as d) {
+    <!-- Summary -->
+    <div class="kpis">
+      <div class="kpi">
+        <span class="label">Laps</span>
+        <span class="value num">{{ p.totalLaps }}</span>
+      </div>
+      <div class="kpi">
+        <span class="label">Race time</span>
+        <span class="value num">{{ dur(p.totalSec) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="label">Finish</span>
+        <span class="value num">{{ clock(p.totalSec, true) }}</span>
+      </div>
+      <div class="kpi">
+        <span class="label">Pit stops</span>
+        <span class="value num">{{ p.stops }}</span>
+      </div>
+      <div class="kpi wide">
+        <span class="label">Tyres used / available</span>
+        <span class="sets">
+          @for (t of d.tyres; track t.id) {
+            <span class="chip" [class.wet]="t.weather === 'wet'">
+              {{ t.name }} {{ p.tyresUsed[t.name] ?? 0 }}/{{ t.tyres }}
+            </span>
+          }
+        </span>
+      </div>
+    </div>
+
+    @if (p.warnings.length) {
+      <div class="alert warn">
+        Strategy warnings
+        <ul>
+          @for (w of p.warnings; track w) { <li>{{ w }}</li> }
+        </ul>
+      </div>
+    }
+    @if (issues().length) {
+      <div class="alert warn">
+        Crew issues
+        <ul>
+          @for (w of issues(); track w) { <li>{{ w }}</li> }
+        </ul>
+      </div>
+    }
+
+    <!-- Timeline -->
+    <div class="card">
+      <h3>Timeline</h3>
+      <div class="timeline">
+        <div class="ticks">
+          @for (h of hours(); track h) {
+            <span class="tick" [style.left.%]="pct(h * 3600)">{{ clock(h * 3600) }}</span>
+          }
+        </div>
+        <div class="lane-label">Driver</div>
+        <div class="lane">
+          @for (s of p.stints; track s.index) {
+            <div
+              class="seg"
+              [style.left.%]="pct(s.startSec)"
+              [style.width.%]="pct(s.driveSec)"
+              [style.background]="driver(assignment(s.index).driverId)?.color ?? '#444'"
+              [title]="'Stint ' + (s.index + 1) + ' · ' + (driver(assignment(s.index).driverId)?.name ?? '—') + ' · ' + clock(s.startSec) + '–' + clock(s.endSec)"
+            >
+              <span>{{ s.index + 1 }}</span>
+            </div>
+          }
+        </div>
+        <div class="lane-label">Spotter</div>
+        <div class="lane thin">
+          @for (s of p.stints; track s.index) {
+            <div
+              class="seg"
+              [style.left.%]="pct(s.startSec)"
+              [style.width.%]="pct(s.driveSec)"
+              [style.background]="driver(assignment(s.index).spotterId)?.color ?? '#333'"
+            ></div>
+          }
+        </div>
+        <div class="lane-label">Tyres</div>
+        <div class="lane thin">
+          @for (s of p.stints; track s.index) {
+            <div
+              class="seg tyre"
+              [class.wet]="s.weather === 'wet'"
+              [class.fresh]="s.tyreChange === 4"
+              [class.half]="s.tyreChange === 2"
+              [style.left.%]="pct(s.startSec)"
+              [style.width.%]="pct(s.driveSec)"
+              [title]="tyreLabel(s)"
+            >
+              <span>{{ s.compoundName.charAt(0) }}</span>
+            </div>
+          }
+        </div>
+        <div class="lane-label">Weather</div>
+        <div class="lane thin weather">
+          @for (w of d.race.weather; track w.id) {
+            @if (w.weather === 'wet') {
+              <div class="seg rain" [style.left.%]="pct(w.fromMin * 60)" [style.width.%]="pct((w.toMin - w.fromMin) * 60)"></div>
+            }
+          }
+        </div>
+      </div>
+    </div>
+
+    <!-- Crew totals -->
+    <div class="card">
+      <div class="row" style="margin-bottom: 12px">
+        <h3 style="margin: 0">Crew</h3>
+        <span class="spacer"></span>
+        <button class="btn sm" (click)="unlockAll()">Unlock all</button>
+        <button class="btn sm primary" (click)="store.rebalanceCrew()">Re-balance crew</button>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Driver</th><th>Driving</th><th>Target</th><th>Gap</th><th>Max</th><th>Stints</th><th>Spotting</th>
+              <th style="width: 40%"></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (t of totals(); track t.driverId) {
+              @let drv = driver(t.driverId)!;
+              <tr>
+                <td><span class="row"><span class="dot" [style.background]="drv.color"></span>{{ drv.name }}</span></td>
+                <td class="num">{{ hm(t.driveSec) }}</td>
+                <td class="num muted">{{ hm(t.targetSec) }}</td>
+                <td class="num" [class.bad]="Math.abs(t.driveSec - t.targetSec) > 1800">
+                  {{ t.driveSec >= t.targetSec ? '+' : '−' }}{{ hm(Math.abs(t.driveSec - t.targetSec)) }}
+                </td>
+                <td class="num muted" [class.bad]="drv.maxDriveMin != null && t.driveSec > drv.maxDriveMin * 60">
+                  {{ drv.maxDriveMin != null ? hm(drv.maxDriveMin * 60) : '—' }}
+                </td>
+                <td class="num">{{ t.stints }}</td>
+                <td class="num muted">{{ hm(t.spotSec) }}</td>
+                <td>
+                  <div class="bar">
+                    <div [style.width.%]="(t.driveSec / p.totalSec) * 100" [style.background]="drv.color"></div>
+                    <i [style.left.%]="(t.targetSec / p.totalSec) * 100"></i>
+                  </div>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Stints -->
+    <div class="card">
+      <div class="row" style="margin-bottom: 12px">
+        <h3 style="margin: 0">Stints</h3>
+        <span class="muted small">
+          Drivers only change at 4-tyre stops. Picking a driver/spotter locks it (🔒). Click an availability cell to cycle
+          available → preferred → unavailable. Overrides apply on the next "Calculate strategy".
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table class="data stints">
+          <thead>
+            <tr>
+              <th>#</th><th>Laps</th><th>Time</th><th>Length</th><th>Avg lap</th><th>Tyres</th><th>VE</th>
+              <th>Stop after</th><th>Driver</th><th>Spotter</th>
+              <th>Availability</th><th>Overrides</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (s of p.stints; track s.index) {
+              @let a = assignment(s.index);
+              @let o = override(s.index);
+              <tr [class.wet]="s.weather === 'wet'">
+                <td class="num"><b>{{ s.index + 1 }}</b></td>
+                <td class="num">{{ s.startLap }}–{{ s.endLap }} <span class="muted">({{ s.laps }})</span></td>
+                <td class="num">{{ clock(s.startSec) }}–{{ clock(s.endSec) }}</td>
+                <td class="num">{{ dur(s.driveSec) }}</td>
+                <td class="num">{{ lap(s.avgLapSec) }}</td>
+                <td>
+                  <span class="chip" [class.new]="s.tyreChange > 0" [class.wet]="s.weather === 'wet'">
+                    {{ tyreLabel(s) }}
+                  </span>
+                  <span class="muted small"> wear {{ s.tyreWearEndPct.toFixed(0) }}%</span>
+                </td>
+                <td class="num small">{{ s.veStartPct.toFixed(1) }} → {{ s.veEndPct.toFixed(1) }}%</td>
+                <td class="num" [title]="stopTitle(s)">
+                  @if (s.stop) {
+                    {{ s.stop.totalSec.toFixed(1) }}s
+                    <span class="muted small">+{{ s.stop.refuelPct.toFixed(0) }}%{{ s.stop.tyreCount ? ' · ' + s.stop.tyreCount + ' tyres' : '' }}</span>
+                  } @else {
+                    <span class="muted">Finish</span>
+                  }
+                </td>
+                <td>
+                  @if (s.index > 0 && s.tyreChange !== 4) {
+                    <span class="row nowrap muted small same" title="No 4-tyre change: the driver stays in">
+                      <span class="dot" [style.background]="driver(a.driverId)?.color ?? 'transparent'"></span>
+                      ↳ {{ driver(a.driverId)?.name ?? '—' }} stays in
+                    </span>
+                  } @else {
+                  <span class="row nowrap">
+                    <span class="dot" [style.background]="driver(a.driverId)?.color ?? 'transparent'"></span>
+                    <select [ngModel]="a.driverId" (ngModelChange)="setDriver(s.index, $event)">
+                      <option [ngValue]="null">—</option>
+                      @for (drv of d.drivers; track drv.id) {
+                        <option [ngValue]="drv.id">{{ drv.name }}</option>
+                      }
+                    </select>
+                    <button class="lock" [class.on]="a.driverLocked" (click)="toggleLock(s.index, 'driver')" title="Lock driver">
+                      {{ a.driverLocked ? '🔒' : '🔓' }}
+                    </button>
+                  </span>
+                  }
+                </td>
+                <td>
+                  <span class="row nowrap">
+                    <select [ngModel]="a.spotterId" (ngModelChange)="setSpotter(s.index, $event)">
+                      <option [ngValue]="null">—</option>
+                      @for (drv of d.drivers; track drv.id) {
+                        @if (drv.id !== a.driverId) {
+                          <option [ngValue]="drv.id">{{ drv.name }}</option>
+                        }
+                      }
+                    </select>
+                    <button class="lock" [class.on]="a.spotterLocked" (click)="toggleLock(s.index, 'spotter')" title="Lock spotter">
+                      {{ a.spotterLocked ? '🔒' : '🔓' }}
+                    </button>
+                  </span>
+                </td>
+                <td>
+                  <span class="avail">
+                    @for (drv of d.drivers; track drv.id; let i = $index) {
+                      <button
+                        class="cell {{ avail()[s.index][i] }}"
+                        [style.borderColor]="drv.color"
+                        [title]="drv.name + ': ' + avail()[s.index][i]"
+                        (click)="cycleAvailability(s.index, drv)"
+                      >{{ i + 1 }}</button>
+                    }
+                  </span>
+                </td>
+                <td>
+                  <span class="row nowrap" (change)="overrideChanged()" (input)="overrideChanged()">
+                    <input type="number" min="1" class="laps" [(ngModel)]="o.lockedLaps" placeholder="laps" title="Lock stint length" />
+                    <select [(ngModel)]="o.tyreAction" title="Tyres at the start of this stint">
+                      <option value="auto">Tyres: auto</option>
+                      <option value="four">4 new tyres</option>
+                      <option value="two">2 new tyres</option>
+                      <option value="keep">Keep tyres</option>
+                    </select>
+                    <select [(ngModel)]="o.compoundId" title="Compound">
+                      <option [ngValue]="null">Any</option>
+                      @for (t of d.tyres; track t.id) {
+                        <option [ngValue]="t.id">{{ t.name }}</option>
+                      }
+                    </select>
+                    @if (hasOverride(s.index)) {
+                      <button class="btn sm ghost" (click)="clearOverride(s.index)" title="Clear overrides">✕</button>
+                    }
+                  </span>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+  }
+} @else {
+  <div class="card empty">
+    <p>No strategy calculated yet.</p>
+    <p class="muted">Fill in the race setup and drivers, then press <b>Calculate strategy</b>.</p>
+    <button class="btn" (click)="goSetup.emit()">Go to race setup</button>
+  </div>
+}

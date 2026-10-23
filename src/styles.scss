@@ -1,0 +1,251 @@
+:root {
+  --bg: #0f1216;
+  --panel: #171b21;
+  --panel-2: #1e232b;
+  --border: #2a313b;
+  --text: #e6e9ee;
+  --muted: #8b95a3;
+  --accent: #e4572e;
+  --accent-2: #ff7a50;
+  --ok: #3fb950;
+  --warn: #f3a712;
+  --bad: #f85149;
+  --wet: #4aa3ff;
+  --radius: 8px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+a {
+  color: var(--accent-2);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+h2 {
+  font-size: 16px;
+}
+h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.page {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.spacer {
+  flex: 1;
+}
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 12px;
+}
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+
+  &.inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+  }
+}
+
+input,
+select,
+textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  min-width: 0;
+
+  &:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+  &.invalid {
+    border-color: var(--bad);
+  }
+}
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+input[type='color'] {
+  padding: 0;
+  width: 34px;
+  height: 30px;
+}
+
+.btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 12px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover {
+    border-color: var(--muted);
+  }
+  &.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    &:hover {
+      background: var(--accent-2);
+    }
+  }
+  &.ghost {
+    background: transparent;
+    border-color: transparent;
+    &:hover {
+      border-color: var(--border);
+    }
+  }
+  &.danger:hover {
+    border-color: var(--bad);
+    color: var(--bad);
+  }
+  &.sm {
+    padding: 3px 8px;
+    font-size: 12px;
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+
+  th,
+  td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+  th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  tbody tr:hover {
+    background: var(--panel-2);
+  }
+}
+.table-wrap {
+  overflow-x: auto;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+
+  &.wet {
+    color: var(--wet);
+    border-color: color-mix(in srgb, var(--wet) 40%, transparent);
+  }
+  &.new {
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  }
+}
+
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.alert {
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  border: 1px solid;
+  &.error {
+    color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 50%, transparent);
+    background: color-mix(in srgb, var(--bad) 8%, transparent);
+  }
+  &.warn {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+  }
+  ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
+  }
+}
