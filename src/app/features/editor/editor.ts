@@ -17,29 +17,24 @@ type Tab = 'setup' | 'drivers' | 'plan' | 'history' | 'me';
     @if (store.current(); as rec) {
       <div class="page">
         <div class="row head">
-          @if (teamId) {
-            <a [routerLink]="['/team', teamId]" class="muted">← Team</a>
-          } @else {
-            <a routerLink="/" class="muted">← Home</a>
-          }
-          <input class="title" [ngModel]="rec.name" (ngModelChange)="store.rename($event)" [disabled]="!store.canEdit()" />
+          <a routerLink="/" class="muted">← Home</a>
+          <input class="title" [ngModel]="rec.name" (ngModelChange)="store.rename($event)" />
           <span class="muted small">
-            @if (store.canEdit()) {
-              {{ store.saving() ? 'Saving…' : 'Saved' }}
-            } @else {
-              Read only · you can set your own availability
-            }
+            {{ store.saving() ? 'Saving…' : 'Saved' }}{{ rec.shareToken ? ' · shared' : ' · local' }}
             @if (rec.baseVersion) { · based on v{{ rec.baseVersion }} }
           </span>
           <span class="spacer"></span>
           @if (rec.dirty && rec.plan) {
             <span class="chip" style="color: var(--warn)">Inputs changed – recalculate</span>
           }
-          <button class="btn" (click)="exportJson()">Export</button>
-          @if (store.canEdit()) {
-            <button class="btn" [disabled]="!rec.plan" (click)="store.saveVersion('Manual save')">Save version</button>
-            <button class="btn primary" (click)="calculate()">Calculate strategy</button>
+          @if (rec.shareToken) {
+            <button class="btn" (click)="copyLink(rec.shareToken)" title="Anyone with this link can see and edit the strategy">
+              {{ copied() ? 'Link copied' : 'Copy share link' }}
+            </button>
           }
+          <button class="btn" (click)="exportJson()">Export</button>
+          <button class="btn" [disabled]="!rec.plan" (click)="store.saveVersion('Manual save')">Save version</button>
+          <button class="btn primary" (click)="calculate()">Calculate strategy</button>
         </div>
 
         @if (store.error()) {
@@ -58,7 +53,7 @@ type Tab = 'setup' | 'drivers' | 'plan' | 'history' | 'me';
         }
 
         <nav class="tabs">
-          @if (store.isCloud()) {
+          @if (store.isShared()) {
             <button [class.active]="tab() === 'me'" (click)="tab.set('me')">My availability</button>
           }
           <button [class.active]="tab() === 'plan'" (click)="tab.set('plan')">Strategy</button>
@@ -70,15 +65,12 @@ type Tab = 'setup' | 'drivers' | 'plan' | 'history' | 'me';
         @if (tab() === 'me') {
           <app-my-availability-tab />
         } @else {
-          <!-- a disabled fieldset makes every input read-only for drivers -->
-          <fieldset class="plain" [disabled]="!store.canEdit()">
-            @switch (tab()) {
-              @case ('setup') { <app-setup-tab /> }
-              @case ('drivers') { <app-drivers-tab /> }
-              @case ('plan') { <app-plan-tab (goSetup)="tab.set('setup')" /> }
-              @case ('history') { <app-history-tab (restored)="tab.set('plan')" /> }
-            }
-          </fieldset>
+          @switch (tab()) {
+            @case ('setup') { <app-setup-tab /> }
+            @case ('drivers') { <app-drivers-tab /> }
+            @case ('plan') { <app-plan-tab (goSetup)="tab.set('setup')" /> }
+            @case ('history') { <app-history-tab (restored)="tab.set('plan')" /> }
+          }
         }
       </div>
     } @else if (notFound()) {
@@ -97,7 +89,6 @@ type Tab = 'setup' | 'drivers' | 'plan' | 'history' | 'me';
     .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
     .tabs button { background: none; border: none; color: var(--muted); padding: 10px 14px; font: inherit; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
     .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
-    fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
   `,
 })
 export class Editor implements OnInit, OnDestroy {
@@ -105,14 +96,19 @@ export class Editor implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   protected readonly tab = signal<Tab>('setup');
   protected readonly notFound = signal(false);
-  protected readonly teamId = this.route.snapshot.paramMap.get('teamId');
+  protected readonly copied = signal(false);
 
   async ngOnInit(): Promise<void> {
-    const ok = await this.store.load(this.route.snapshot.paramMap.get('id')!, this.teamId ?? undefined);
+    const token = this.route.snapshot.paramMap.get('token');
+    const ok = await this.store.load(token ?? this.route.snapshot.paramMap.get('id')!, !!token);
     this.notFound.set(!ok);
-    if (!ok) return;
-    if (!this.store.canEdit()) this.tab.set('me');
-    else if (this.store.current()?.plan) this.tab.set('plan');
+    if (ok && this.store.current()?.plan) this.tab.set('plan');
+  }
+
+  async copyLink(token: string): Promise<void> {
+    await navigator.clipboard.writeText(this.store.shareUrl(token));
+    this.copied.set(true);
+    setTimeout(() => this.copied.set(false), 1500);
   }
 
   ngOnDestroy(): void {

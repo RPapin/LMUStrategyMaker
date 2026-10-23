@@ -1,5 +1,4 @@
 export type Category = 'hypercar' | 'lmp2' | 'gt3';
-export type TeamRole = 'owner' | 'editor' | 'driver';
 export type Weather = 'dry' | 'wet';
 /** Tyres changed at a stop: none, one side (2) or all four. */
 export type TyreChange = 0 | 2 | 4;
@@ -175,6 +174,6 @@ export interface StrategyRecord {
   /** True when the draft changed since the plan was last calculated. */
   dirty: boolean;
   versions: StrategyVersion[];
-  /** Set for strategies stored in a Supabase team, absent for local ones. */
-  teamId?: string | null;
+  /** Secret link token for shared strategies, absent for local ones. */
+  shareToken?: string | null;
 }

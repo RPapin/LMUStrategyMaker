@@ -1,11 +1,11 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
-import { AvailabilityRow, CloudRepo, Member, overlayAvailability, StrategyRow, versionFromRow } from './cloud/cloud-repo';
+import { AvailabilityRow, CloudRepo, ConflictError, LiveChannel, overlayAvailability } from './cloud/cloud-repo';
 import { Supabase } from './cloud/supabase';
 import { db } from './db';
 import { defaultInputs, tyresForCategory } from './defaults';
 import { assignCrew } from './engine/assign';
 import { computeStrategy, retime } from './engine/strategy';
-import { Driver, StrategyInputs, StrategyRecord, StrategyVersion, TeamRole } from './models';
+import { Driver, StrategyInputs, StrategyRecord, StrategyVersion } from './models';
 import { clone, uid } from './util';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -54,35 +54,56 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+export interface SharedEntry {
+  token: string;
+  name: string;
+  openedAt: string;
+}
+
+const SHARED_KEY = 'sm-shared';
+const meKey = (token: string) => `sm-me-${token}`;
+
+function readStorage<T>(key: string, fallback: T): T {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? (JSON.parse(v) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStorage(key: string, value: unknown): void {
+  try {
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // storage unavailable (private mode): only the convenience is lost
+  }
+}
+
 @Injectable({ providedIn: 'root' })
 export class StrategyStore {
   private readonly sb = inject(Supabase);
   private readonly cloud = inject(CloudRepo);
 
   readonly list = signal<StrategyRecord[]>([]);
+  /** Shared strategies opened in this browser. */
+  readonly shared = signal<SharedEntry[]>(readStorage<SharedEntry[]>(SHARED_KEY, []));
   readonly current = signal<StrategyRecord | null>(null);
   readonly error = signal<string | null>(null);
   readonly notice = signal<string | null>(null);
   readonly saving = signal(false);
+  readonly sharingAvailable = this.sb.configured;
 
-  /** Role in the team of the current strategy, null for a local strategy. */
-  readonly role = signal<TeamRole | null>(null);
-  /** Driver slot -> linked user, for team strategies. */
-  readonly links = signal<Record<string, string | null>>({});
-  readonly members = signal<Member[]>([]);
-  readonly isCloud = computed(() => !!this.current()?.teamId);
-  readonly canEdit = computed(() => !this.current()?.teamId || this.role() === 'owner' || this.role() === 'editor');
-  /** The driver slot of the signed-in user in the current team strategy. */
-  readonly myDriverId = computed(() => {
-    const me = this.sb.user()?.id;
-    const entry = Object.entries(this.links()).find(([, u]) => u === me);
-    return me && entry ? entry[0] : null;
-  });
+  readonly isShared = computed(() => !!this.current()?.shareToken);
+  /** Which driver of the shared strategy this browser is (remembered per strategy). */
+  readonly myDriverId = signal<string | null>(null);
 
+  private revision = 0;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly availabilityTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly versionTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private unsubscribe: (() => void) | null = null;
+  private channel: LiveChannel | null = null;
 
   // ------------------------------------------------------------- local list
 
@@ -134,7 +155,7 @@ export class StrategyStore {
     if (!rec?.draft?.race || !Array.isArray(rec.versions)) throw new Error('Not a strategy file.');
     migrate(rec);
     rec.id = uid();
-    rec.teamId = null;
+    rec.shareToken = null;
     rec.updatedAt = new Date().toISOString();
     await db.put(rec);
     await this.refreshList();
@@ -142,45 +163,76 @@ export class StrategyStore {
   }
 
   export(rec: StrategyRecord): string {
-    const { teamId: _team, ...rest } = rec;
+    const { shareToken: _token, ...rest } = rec;
     return JSON.stringify(rest, null, 2);
   }
 
-  /** Copies a local strategy (with its versions) into a team. Returns the new team strategy id. */
-  async uploadToTeam(localId: string, teamId: string): Promise<string> {
+  // ------------------------------------------------------------- sharing
+
+  /** Creates a new shared strategy. Returns its link token. */
+  async createShared(name: string): Promise<string> {
+    return this.cloud.create(this.newRecord(name));
+  }
+
+  /** Copies a local strategy (with its versions) to a share link. The local copy is kept. */
+  async share(localId: string): Promise<string> {
     const rec = await db.get(localId);
     if (!rec) throw new Error('Strategy not found.');
     migrate(rec);
-    return this.cloud.create(teamId, rec);
+    return this.cloud.create(rec);
+  }
+
+  shareUrl(token: string): string {
+    return `${location.origin}/s/${token}`;
+  }
+
+  forgetShared(token: string): void {
+    this.shared.set(this.shared().filter((s) => s.token !== token));
+    writeStorage(SHARED_KEY, this.shared());
+  }
+
+  private rememberShared(rec: StrategyRecord): void {
+    const entry: SharedEntry = { token: rec.shareToken!, name: rec.name, openedAt: new Date().toISOString() };
+    this.shared.set([entry, ...this.shared().filter((s) => s.token !== entry.token)].slice(0, 50));
+    writeStorage(SHARED_KEY, this.shared());
+  }
+
+  setMe(driverId: string | null): void {
+    const token = this.current()?.shareToken;
+    if (!token) return;
+    this.myDriverId.set(driverId);
+    writeStorage(meKey(token), driverId);
   }
 
   // ------------------------------------------------------------- open / close
 
-  async load(id: string, teamId?: string): Promise<boolean> {
+  /** Opens a local strategy (by id) or a shared one (by link token). */
+  async load(id: string, shared = false): Promise<boolean> {
     this.close();
     this.error.set(null);
-    if (!teamId) {
+    this.notice.set(null);
+    if (!shared) {
       const rec = await db.get(id);
       if (rec) migrate(rec);
       this.current.set(rec ?? null);
       return !!rec;
     }
     try {
-      const { record, role, availability } = await this.cloud.load(id);
-      migrate(record);
-      this.role.set(role);
-      this.members.set(await this.cloud.members(record.teamId!));
-      this.links.set(Object.fromEntries(availability.map((a) => [a.driver_id, a.user_id])));
-      this.current.set(record);
-      this.unsubscribe = this.cloud.subscribe(id, {
-        strategy: (row) => this.onRemoteStrategy(row),
-        version: (row) => this.onRemoteVersion(versionFromRow(row)),
+      const res = await this.cloud.load(id);
+      if (!res) return false;
+      migrate(res.record);
+      this.revision = res.revision;
+      this.current.set(res.record);
+      this.myDriverId.set(readStorage<string | null>(meKey(id), null));
+      this.rememberShared(res.record);
+      this.channel = this.cloud.live(id, {
+        strategy: (revision) => this.onRemoteSave(revision),
+        version: () => this.onRemoteVersion(),
         availability: (row) => this.onRemoteAvailability(row),
       });
       return true;
     } catch (e) {
       this.error.set(errorText(e));
-      this.current.set(null);
       return false;
     }
   }
@@ -193,11 +245,9 @@ export class StrategyStore {
       this.saveTimer = null;
       this.persist(rec);
     }
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.role.set(null);
-    this.links.set({});
-    this.members.set([]);
+    this.channel?.close();
+    this.channel = null;
+    this.myDriverId.set(null);
     this.current.set(null);
   }
 
@@ -221,26 +271,27 @@ export class StrategyStore {
   }
 
   /**
-   * A driver's availability changed. In a team it is stored in its own row so that
-   * every driver can edit theirs without write access to the strategy.
+   * A driver's availability changed. For a shared strategy it is also saved in its own row,
+   * so a driver setting theirs does not overwrite what the strategist edits at the same time.
    */
   availabilityChanged(driver: Driver): void {
     const rec = this.current();
     if (!rec) return;
-    if (!rec.teamId) {
+    const token = rec.shareToken;
+    if (!token) {
       this.touch(false);
       return;
     }
+    // only the availability row is saved, not the whole strategy
     this.current.set({ ...rec });
-    if (this.canEdit()) this.scheduleSave();
-    const key = driver.id;
-    clearTimeout(this.availabilityTimers.get(key));
+    clearTimeout(this.availabilityTimers.get(driver.id));
     this.availabilityTimers.set(
-      key,
+      driver.id,
       setTimeout(async () => {
-        this.availabilityTimers.delete(key);
+        this.availabilityTimers.delete(driver.id);
         try {
-          await this.cloud.saveAvailability(rec.id, driver.id, driver.availability, this.canEdit());
+          await this.cloud.setAvailability(token, driver.id, driver.availability);
+          this.channel?.availabilityChanged({ driver_id: driver.id, windows: driver.availability });
         } catch (e) {
           this.error.set(`Availability not saved: ${errorText(e)}`);
         }
@@ -248,39 +299,10 @@ export class StrategyStore {
     );
   }
 
-  async claimDriver(driverId: string): Promise<void> {
-    const rec = this.current();
-    if (!rec?.teamId) return;
-    try {
-      await this.cloud.claimDriver(rec.id, driverId);
-      const me = this.sb.user()!.id;
-      const links = { ...this.links() };
-      for (const k of Object.keys(links)) if (links[k] === me) links[k] = null;
-      links[driverId] = me;
-      this.links.set(links);
-    } catch (e) {
-      this.error.set(errorText(e));
-    }
-  }
-
-  async linkDriver(driverId: string, userId: string | null): Promise<void> {
-    const rec = this.current();
-    if (!rec?.teamId) return;
-    try {
-      await this.cloud.linkDriver(rec.id, driverId, userId);
-      const links = { ...this.links() };
-      if (userId) for (const k of Object.keys(links)) if (links[k] === userId) links[k] = null;
-      links[driverId] = userId;
-      this.links.set(links);
-    } catch (e) {
-      this.error.set(errorText(e));
-    }
-  }
-
   /** Full recalculation (stints + crew), saved as a new version. */
   calculate(label = 'Recalculated'): boolean {
     const rec = this.current();
-    if (!rec || !this.canEdit()) return false;
+    if (!rec) return false;
     try {
       let plan = computeStrategy(rec.draft);
       rec.draft.assignments = assignCrew(rec.draft, plan);
@@ -300,7 +322,7 @@ export class StrategyStore {
   /** Re-balance only the crew on the current stints, saved as a new version. */
   rebalanceCrew(): void {
     const rec = this.current();
-    if (!rec?.plan || !this.canEdit()) return;
+    if (!rec?.plan) return;
     rec.draft.assignments = assignCrew(rec.draft, rec.plan);
     rec.plan = retime(rec.plan, rec.draft);
     this.pushVersion(rec, 'Crew re-balanced');
@@ -308,7 +330,7 @@ export class StrategyStore {
 
   saveVersion(label: string): void {
     const rec = this.current();
-    if (rec && this.canEdit()) this.pushVersion(rec, label || 'Manual save');
+    if (rec) this.pushVersion(rec, label || 'Manual save');
   }
 
   /**
@@ -317,7 +339,7 @@ export class StrategyStore {
    */
   restore(version: StrategyVersion): void {
     const rec = this.current();
-    if (!rec || !this.canEdit()) return;
+    if (!rec) return;
     const windows = new Map(rec.draft.drivers.map((d) => [d.id, d.availability]));
     rec.draft = clone(version.inputs);
     for (const d of rec.draft.drivers) d.availability = windows.get(d.id) ?? d.availability;
@@ -329,8 +351,8 @@ export class StrategyStore {
   updateVersionMeta(version: StrategyVersion, label: string, note: string): void {
     version.label = label;
     version.note = note;
-    const rec = this.current();
-    if (!rec?.teamId) {
+    const token = this.current()?.shareToken;
+    if (!token) {
       this.touch(false);
       return;
     }
@@ -339,7 +361,7 @@ export class StrategyStore {
       version.id,
       setTimeout(() => {
         this.versionTimers.delete(version.id);
-        this.cloud.updateVersionMeta(version).catch((e) => this.error.set(errorText(e)));
+        this.cloud.updateVersion(token, version).catch((e) => this.error.set(errorText(e)));
       }, 500),
     );
   }
@@ -354,10 +376,9 @@ export class StrategyStore {
   // ------------------------------------------------------------- persistence
 
   private pushVersion(rec: StrategyRecord, label: string): void {
-    const number = (rec.versions[rec.versions.length - 1]?.number ?? 0) + 1;
     const version: StrategyVersion = {
       id: uid(),
-      number,
+      number: (rec.versions[rec.versions.length - 1]?.number ?? 0) + 1,
       createdAt: new Date().toISOString(),
       label,
       note: '',
@@ -365,14 +386,29 @@ export class StrategyStore {
       plan: clone(rec.plan),
     };
     rec.versions.push(version);
-    rec.baseVersion = number;
+    rec.baseVersion = version.number;
     this.current.set({ ...rec });
-    if (rec.teamId) {
-      this.cloud
-        .addVersion(rec.id, version)
-        .catch((e) => this.error.set(`Version v${number} not saved (another editor may have saved at the same time, reload): ${errorText(e)}`));
+    const token = rec.shareToken;
+    if (!token) {
+      this.scheduleSave(0);
+      return;
     }
-    this.scheduleSave(0);
+    // the server numbers versions, so two people saving at once never collide
+    this.saving.set(true);
+    this.cloud
+      .addVersion(token, version)
+      .then((saved) => {
+        Object.assign(version, saved);
+        rec.versions.sort((a, b) => a.number - b.number);
+        rec.baseVersion = saved.number;
+        this.current.set({ ...rec });
+        this.channel?.versionAdded();
+        this.scheduleSave(0);
+      })
+      .catch((e) => {
+        this.saving.set(false);
+        this.error.set(`Version not saved: ${errorText(e)}`);
+      });
   }
 
   private scheduleSave(delay = 400): void {
@@ -387,51 +423,61 @@ export class StrategyStore {
   }
 
   private async persist(rec: StrategyRecord): Promise<void> {
-    const canEdit = this.canEdit();
+    rec.updatedAt = new Date().toISOString();
     try {
-      rec.updatedAt = new Date().toISOString();
-      if (!rec.teamId) await db.put(clone(rec));
-      else if (canEdit) await this.cloud.save(rec);
+      if (!rec.shareToken) {
+        await db.put(clone(rec));
+      } else {
+        this.revision = await this.cloud.save(rec.shareToken, rec, this.revision);
+        this.channel?.strategySaved(this.revision);
+        this.rememberShared(rec);
+      }
     } catch (e) {
-      this.error.set(`Not saved: ${errorText(e)}`);
+      if (e instanceof ConflictError) await this.reloadAfterConflict();
+      else this.error.set(`Not saved: ${errorText(e)}`);
     }
     this.saving.set(false);
   }
 
-  // ------------------------------------------------------------- realtime
+  // ------------------------------------------------------------- live updates
 
-  private onRemoteStrategy(row: StrategyRow): void {
-    const rec = this.current();
-    if (!rec || row.updated_by === this.sb.user()?.id || this.saveTimer) return;
-    const draft = row.draft;
-    const windows = new Map(rec.draft.drivers.map((d) => [d.id, d.availability]));
-    migrateInputs(draft);
-    for (const d of draft.drivers) d.availability = windows.get(d.id) ?? d.availability;
-    rec.draft = draft;
-    rec.plan = row.plan;
-    migratePlan(rec.plan);
-    rec.name = row.name;
-    rec.baseVersion = row.base_version;
-    rec.dirty = row.dirty;
-    this.current.set({ ...rec });
-    this.notice.set('Updated by a teammate.');
+  /** Someone else saved in between: take their version so nothing is silently overwritten. */
+  private async reloadAfterConflict(): Promise<void> {
+    await this.reloadFromServer();
+    this.notice.set('Someone else changed this strategy at the same time. Their version is loaded: redo your last change.');
   }
 
-  private onRemoteVersion(v: StrategyVersion): void {
+  private async reloadFromServer(): Promise<void> {
     const rec = this.current();
-    if (!rec || rec.versions.some((x) => x.id === v.id || x.number === v.number)) return;
-    migrateInputs(v.inputs);
-    migratePlan(v.plan);
-    rec.versions.push(v);
+    if (!rec?.shareToken) return;
+    const res = await this.cloud.load(rec.shareToken);
+    if (!res || this.current()?.shareToken !== rec.shareToken) return;
+    migrate(res.record);
+    this.revision = res.revision;
+    this.current.set(res.record);
+  }
+
+  private onRemoteSave(revision: number): void {
+    // a pending local save will detect the conflict itself
+    if (revision <= this.revision || this.saveTimer) return;
+    this.reloadFromServer().catch((e) => this.error.set(errorText(e)));
+  }
+
+  private async onRemoteVersion(): Promise<void> {
+    const rec = this.current();
+    if (!rec?.shareToken) return;
+    const res = await this.cloud.load(rec.shareToken);
+    if (!res || this.current() !== rec) return;
+    migrate(res.record);
+    const known = new Set(rec.versions.map((v) => v.id));
+    rec.versions.push(...res.record.versions.filter((v) => !known.has(v.id)));
     rec.versions.sort((a, b) => a.number - b.number);
     this.current.set({ ...rec });
   }
 
   private onRemoteAvailability(row: AvailabilityRow): void {
     const rec = this.current();
-    if (!rec) return;
-    this.links.set({ ...this.links(), [row.driver_id]: row.user_id });
-    if (this.availabilityTimers.has(row.driver_id)) return; // our own pending edit is newer
+    if (!rec || this.availabilityTimers.has(row.driver_id)) return; // our own pending edit is newer
     overlayAvailability(rec.draft, [row]);
     this.current.set({ ...rec });
   }

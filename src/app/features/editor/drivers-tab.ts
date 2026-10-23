@@ -25,17 +25,6 @@ import { startEpoch, toLocalInput } from '../../core/util';
             <input type="color" [(ngModel)]="drv.color" />
             <input [(ngModel)]="drv.name" style="font-weight: 600; width: 220px" />
             <label class="field inline"><input type="checkbox" [(ngModel)]="drv.canSpot" /> Can spot</label>
-            @if (store.isCloud()) {
-              <label class="field inline">
-                Team member
-                <select [ngModel]="store.links()[drv.id] ?? null" (ngModelChange)="store.linkDriver(drv.id, $event)">
-                  <option [ngValue]="null">— not linked —</option>
-                  @for (m of store.members(); track m.user_id) {
-                    <option [ngValue]="m.user_id">{{ m.display_name }}</option>
-                  }
-                </select>
-              </label>
-            }
             <span class="spacer"></span>
             <button class="btn sm danger" (click)="remove(drv)">Remove</button>
           </div>

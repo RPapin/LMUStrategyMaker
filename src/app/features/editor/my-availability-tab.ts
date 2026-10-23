@@ -28,7 +28,9 @@ const LABEL: Record<Availability, string> = {
           <div class="row" style="margin-bottom: 12px">
             <span class="dot" [style.background]="drv.color"></span>
             <h2 style="margin: 0">{{ drv.name }}</h2>
-            <span class="muted small">This is you in this strategy.</span>
+            <span class="muted small">This is you in this strategy (remembered in this browser).</span>
+            <span class="spacer"></span>
+            <button class="btn sm ghost" (click)="store.setMe(null)">Not me</button>
           </div>
 
           @if (plan(); as p) {
@@ -79,14 +81,12 @@ const LABEL: Record<Availability, string> = {
       } @else {
         <div class="card">
           <h2>Which driver are you?</h2>
-          <p class="muted small">Link yourself to a driver of this strategy to set your availability.</p>
+          <p class="muted small">Pick yourself to set your availability. This browser remembers it for this strategy.</p>
           <div class="row">
             @for (drv of d.drivers; track drv.id) {
-              @if (!store.links()[drv.id]) {
-                <button class="btn" (click)="store.claimDriver(drv.id)">
-                  <span class="dot" [style.background]="drv.color"></span> {{ drv.name }}
-                </button>
-              }
+              <button class="btn" (click)="store.setMe(drv.id)">
+                <span class="dot" [style.background]="drv.color"></span> {{ drv.name }}
+              </button>
             } @empty {
               <span class="muted">No driver in this strategy yet.</span>
             }
