@@ -61,6 +61,30 @@ export function clockAt(startTime: string, raceSec: number, withDay = false): st
   return withDay ? `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${hm}` : hm;
 }
 
+/** Real clock time with seconds ("14:05:09") for a race-clock second. */
+export function clockSecAt(startTime: string, raceSec: number): string {
+  const d = new Date(startEpoch(startTime) + raceSec * 1000);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * Race-clock second for a real clock time ("14:05" or "14:05:09"). The day is the one that puts it
+ * closest to `nearSec`, so long races going past midnight work. NaN when invalid.
+ */
+export function raceSecAt(startTime: string, clock: string, nearSec: number): number {
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(clock.trim());
+  if (!m) return NaN;
+  const start = startEpoch(startTime);
+  const day = new Date(start + nearSec * 1000);
+  day.setHours(+m[1], +m[2], +(m[3] ?? 0), 0);
+  let best = NaN;
+  for (const offset of [-1, 0, 1]) {
+    const sec = (day.getTime() + offset * 86_400_000 - start) / 1000;
+    if (isNaN(best) || Math.abs(sec - nearSec) < Math.abs(best - nearSec)) best = sec;
+  }
+  return best;
+}
+
 /** epoch ms -> value for <input type="datetime-local"> */
 export function toLocalInput(ms: number): string {
   const d = new Date(ms);

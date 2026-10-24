@@ -13,6 +13,7 @@ export function newDriver(index: number): Driver {
     maxDriveMin: null,
     maxConsecutiveStints: 3,
     minRestMin: 0,
+    priority: 1,
     availability: [],
   };
 }

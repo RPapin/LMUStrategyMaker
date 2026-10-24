@@ -42,6 +42,10 @@ import { startEpoch, toLocalInput } from '../../core/util';
             <label class="field">Min rest between stints (min)
               <input type="number" min="0" [(ngModel)]="drv.minRestMin" />
             </label>
+            <label class="field">Priority
+              <input type="number" min="1" step="1" [(ngModel)]="drv.priority" />
+              <span class="small">1 = highest: drives more when time can't be split equally</span>
+            </label>
           </div>
 
           <div class="row" style="margin: 16px 0 8px">

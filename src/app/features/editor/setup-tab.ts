@@ -115,8 +115,12 @@ import { LapInput } from '../../shared/lap-input';
                       <span class="chip" [class.wet]="t.weather === 'wet'">{{ t.weather === 'wet' ? 'Wet' : 'Dry' }}</span>
                     </td>
                     <td>
-                      <input type="number" min="0" step="2" [(ngModel)]="t.tyres" style="width: 70px" />
-                      <span class="muted small"> = {{ t.tyres / 4 }} sets</span>
+                      @if (t.weather === 'wet') {
+                        <span class="muted">Unlimited</span>
+                      } @else {
+                        <input type="number" min="0" step="2" [(ngModel)]="t.tyres" style="width: 70px" />
+                        <span class="muted small"> = {{ t.tyres / 4 }} sets</span>
+                      }
                     </td>
                     <td><input type="number" step="0.1" min="0" [(ngModel)]="t.wearPctPerLap" style="width: 80px" /></td>
                     <td class="muted num">{{ life(t) }} laps</td>

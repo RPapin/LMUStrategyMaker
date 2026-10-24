@@ -12,7 +12,8 @@ describe('assignCrew', () => {
     const totals = crewTotals(inp, plan).map((t) => t.driveSec);
     const max = Math.max(...totals);
     const min = Math.min(...totals);
-    expect(max - min).toBeLessThanOrEqual(Math.max(...plan.stints.map((s) => s.driveSec)));
+    // a driver change is avoided unless it improves the balance a lot
+    expect(max - min).toBeLessThanOrEqual(1.5 * Math.max(...plan.stints.map((s) => s.driveSec)));
   });
 
   it('never picks an unavailable driver and never spots while driving', () => {
@@ -37,39 +38,41 @@ describe('assignCrew', () => {
     expect(res[0].driverId).toBe(inp.drivers[2].id);
   });
 
-  it('never changes driver at a stop without 4 new tyres', () => {
+  it('keeps driver changes to what the stint limits need', () => {
+    const inp = defaultInputs();
+    inp.drivers.forEach((d) => (d.maxConsecutiveStints = 3));
+    const plan = computeStrategy(inp);
+    inp.assignments = assignCrew(inp, plan);
+    const changes = plan.stints.filter((_, j) => j > 0 && inp.assignments[j].driverId !== inp.assignments[j - 1].driverId);
+    expect(changes.length).toBeLessThanOrEqual(Math.ceil(plan.stints.length / 3));
+    expect(crewIssues(inp, plan).filter((i) => i.includes('in a row'))).toEqual([]);
+  });
+
+  it('can change driver at a stop without new tyres', () => {
     const inp = defaultInputs();
     inp.race.serviceParallel = false;
     inp.race.tyreChange4Sec = 40;
     inp.race.tyreChange2Sec = 35;
-    inp.tyres.forEach((t) => (t.degSecPerLap = 0.005));
+    inp.tyres.forEach((t) => (t.degSecPerLap = 0.001));
+    inp.drivers.forEach((d) => (d.maxConsecutiveStints = 2));
     const plan = computeStrategy(inp);
-    expect(plan.stints.some((s, j) => j > 0 && s.tyreChange !== 4)).toBe(true);
+    expect(plan.stints.filter((s) => s.tyreChange === 4).length).toBeLessThan(plan.stints.length / 2);
     inp.assignments = assignCrew(inp, plan);
-    plan.stints.forEach((s, j) => {
-      if (j > 0 && s.tyreChange !== 4) expect(inp.assignments[j].driverId).toBe(inp.assignments[j - 1].driverId);
-    });
-    expect(crewIssues(inp, plan).filter((i) => i.includes('without a 4-tyre change'))).toEqual([]);
+    expect(crewIssues(inp, plan)).toEqual([]);
   });
 
-  it('keeps the same driver on a 2-tyre stop', () => {
-    const inp = defaultInputs();
-    inp.race.serviceParallel = false;
-    inp.tyres = tyresForCategory('gt3');
-    inp.tyres[0].tyres = 28;
-    inp.tyres[0].degSecPerLap = 0.1;
-    const plan = computeStrategy(inp);
-    expect(plan.stints.some((s) => s.tyreChange === 2)).toBe(true);
-    inp.assignments = assignCrew(inp, plan);
-    plan.stints.forEach((s, j) => {
-      if (s.tyreChange === 2) {
-        expect(inp.assignments[j].driverId).toBe(inp.assignments[j - 1].driverId);
-        expect(plan.stints[j - 1].stop!.driverChange).toBe(false);
-      }
-    });
+    it('gives the extra driving time to the highest priority driver', () => {
+    for (const top of [0, 1, 2]) {
+      const inp = defaultInputs();
+      inp.drivers.forEach((d, i) => (d.priority = i === top ? 1 : 2));
+      const plan = computeStrategy(inp);
+      inp.assignments = assignCrew(inp, plan);
+      const totals = crewTotals(inp, plan).map((t) => t.driveSec);
+      expect(totals.indexOf(Math.max(...totals))).toBe(top);
+    }
   });
 
-    it('respects max driving time', () => {
+  it('respects max driving time', () => {
     const inp = defaultInputs();
     inp.drivers.push(newDriver(3));
     inp.drivers[0].maxDriveMin = 45;

@@ -183,3 +183,50 @@ table.stints {
 .same {
   padding-left: 2px;
 }
+
+.card.race .chip.live {
+  color: var(--bad);
+  font-weight: 600;
+}
+tr.done td {
+  opacity: 0.7;
+}
+.pit-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  input[type='time'] {
+    width: 110px;
+  }
+}
+
+.columns {
+  position: relative;
+  summary {
+    list-style: none;
+    cursor: pointer;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 160px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+}
+.left {
+  white-space: nowrap;
+  &.bad {
+    color: var(--bad);
+  }
+}

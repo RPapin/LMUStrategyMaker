@@ -23,12 +23,50 @@
         <span class="sets">
           @for (t of d.tyres; track t.id) {
             <span class="chip" [class.wet]="t.weather === 'wet'">
-              {{ t.name }} {{ p.tyresUsed[t.name] ?? 0 }}/{{ t.tyres }}
+              {{ t.name }} {{ p.tyresUsed[t.name] ?? 0 }}/{{ tyreMax(t) }}
             </span>
           }
         </span>
       </div>
     </div>
+
+    <!-- Race mode -->
+    @if (p.live) {
+      <div class="card race">
+        <div class="row">
+          <span class="chip live">● Race started</span>
+          <span>
+            @if (locked()) {
+              Stints 1–{{ locked() }} are locked (real times). Last pit-in at
+              <b class="num">{{ clock(p.stints[locked() - 1].endSec) }}</b>, lap {{ p.stints[locked() - 1].endLap }}.
+            } @else {
+              When the car pits, enter the real pit-in time of the stint: earlier stints get locked, the next ones are shifted.
+            }
+          </span>
+          <span class="spacer"></span>
+          @if (locked() && locked() < p.stints.length) {
+            <button class="btn sm primary" (click)="store.calculate()" title="New strategy for the rest of the race, starting with the stop after the last locked stint">
+              Re-plan from stint {{ locked() + 1 }}
+            </button>
+          }
+          <button class="btn sm ghost" (click)="store.stopRace()" title="Unlock all stints and go back to planning">Leave race mode</button>
+        </div>
+        @if (finishGap(); as gap) {
+          @if (Math.abs(gap) > 1) {
+            <div class="small" style="margin-top: 8px; color: var(--warn)">
+              The shifted plan {{ gap > 0 ? 'still runs ' + dur(gap) + ' after' : 'ends ' + dur(-gap) + ' before' }} the end of the race:
+              re-plan to adjust the remaining stints.
+            </div>
+          }
+        }
+      </div>
+    } @else {
+      <div class="card race row">
+        <span class="muted">Race running? Start race mode to enter real pit times and re-plan the rest of the race.</span>
+        <span class="spacer"></span>
+        <button class="btn sm primary" (click)="store.startRace()">Start race</button>
+      </div>
+    }
 
     @if (p.warnings.length) {
       <div class="alert warn">
@@ -157,112 +195,180 @@
       <div class="row" style="margin-bottom: 12px">
         <h3 style="margin: 0">Stints</h3>
         <span class="muted small">
-          Drivers only change at 4-tyre stops. Picking a driver/spotter locks it (🔒). Click an availability cell to cycle
+          Drivers can change at any stop; the crew assignment avoids changes. Picking a driver/spotter locks it (🔒). Click an availability cell to cycle
           available → preferred → unavailable. Overrides apply on the next "Calculate strategy".
         </span>
+        <span class="spacer"></span>
+        <details class="columns">
+          <summary class="btn sm">Columns</summary>
+          <div class="menu">
+            @for (c of columns; track c.key) {
+              @if (c.key !== 'pit' || p.live) {
+                <label class="row nowrap">
+                  <input type="checkbox" [checked]="show(c.key)" (change)="toggleColumn(c.key)" /> {{ c.label }}
+                </label>
+              }
+            }
+            <button class="btn sm ghost" (click)="showAllColumns()">Show all</button>
+          </div>
+        </details>
       </div>
       <div class="table-wrap">
         <table class="data stints">
           <thead>
             <tr>
-              <th>#</th><th>Laps</th><th>Time</th><th>Length</th><th>Avg lap</th><th>Tyres</th><th>VE</th>
-              <th>Stop after</th><th>Driver</th><th>Spotter</th>
-              <th>Availability</th><th>Overrides</th>
+              <th>#</th>
+              @for (c of columns; track c.key) {
+                @if (show(c.key) && (c.key !== 'pit' || p.live)) { <th>{{ c.label }}</th> }
+              }
             </tr>
           </thead>
           <tbody>
             @for (s of p.stints; track s.index) {
               @let a = assignment(s.index);
               @let o = override(s.index);
-              <tr [class.wet]="s.weather === 'wet'">
-                <td class="num"><b>{{ s.index + 1 }}</b></td>
-                <td class="num">{{ s.startLap }}–{{ s.endLap }} <span class="muted">({{ s.laps }})</span></td>
-                <td class="num">{{ clock(s.startSec) }}–{{ clock(s.endSec) }}</td>
-                <td class="num">{{ dur(s.driveSec) }}</td>
-                <td class="num">{{ lap(s.avgLapSec) }}</td>
-                <td>
-                  <span class="chip" [class.new]="s.tyreChange > 0" [class.wet]="s.weather === 'wet'">
-                    {{ tyreLabel(s) }}
-                  </span>
-                  <span class="muted small"> wear {{ s.tyreWearEndPct.toFixed(0) }}%</span>
-                </td>
-                <td class="num small">{{ s.veStartPct.toFixed(1) }} → {{ s.veEndPct.toFixed(1) }}%</td>
-                <td class="num" [title]="stopTitle(s)">
-                  @if (s.stop) {
-                    {{ s.stop.totalSec.toFixed(1) }}s
-                    <span class="muted small">+{{ s.stop.refuelPct.toFixed(0) }}%{{ s.stop.tyreCount ? ' · ' + s.stop.tyreCount + ' tyres' : '' }}</span>
-                  } @else {
-                    <span class="muted">Finish</span>
-                  }
-                </td>
-                <td>
-                  @if (s.index > 0 && s.tyreChange !== 4) {
-                    <span class="row nowrap muted small same" title="No 4-tyre change: the driver stays in">
-                      <span class="dot" [style.background]="driver(a.driverId)?.color ?? 'transparent'"></span>
-                      ↳ {{ driver(a.driverId)?.name ?? '—' }} stays in
+              @let done = s.index < locked();
+              <tr [class.wet]="s.weather === 'wet'" [class.done]="done">
+                <td class="num"><b>{{ s.index + 1 }}</b>{{ done ? ' 🔒' : '' }}</td>
+                @if (show('laps')) {
+                  <td class="num">{{ s.startLap }}–{{ s.endLap }} <span class="muted">({{ s.laps }})</span></td>
+                }
+                @if (show('time')) {
+                  <td class="num">{{ clock(s.startSec) }}–{{ clock(s.endSec) }}</td>
+                }
+                @if (show('length')) {
+                  <td class="num">{{ dur(s.driveSec) }}</td>
+                }
+                @if (show('avg')) {
+                  <td class="num">{{ lap(s.avgLapSec) }}</td>
+                }
+                @if (show('tyres')) {
+                  <td>
+                    <span class="chip" [class.new]="s.tyreChange > 0" [class.wet]="s.weather === 'wet'">
+                      {{ tyreLabel(s) }}
                     </span>
-                  } @else {
-                  <span class="row nowrap">
-                    <span class="dot" [style.background]="driver(a.driverId)?.color ?? 'transparent'"></span>
-                    <select [ngModel]="a.driverId" (ngModelChange)="setDriver(s.index, $event)">
-                      <option [ngValue]="null">—</option>
-                      @for (drv of d.drivers; track drv.id) {
-                        <option [ngValue]="drv.id">{{ drv.name }}</option>
-                      }
-                    </select>
-                    <button class="lock" [class.on]="a.driverLocked" (click)="toggleLock(s.index, 'driver')" title="Lock driver">
-                      {{ a.driverLocked ? '🔒' : '🔓' }}
-                    </button>
-                  </span>
-                  }
-                </td>
-                <td>
-                  <span class="row nowrap">
-                    <select [ngModel]="a.spotterId" (ngModelChange)="setSpotter(s.index, $event)">
-                      <option [ngValue]="null">—</option>
-                      @for (drv of d.drivers; track drv.id) {
-                        @if (drv.id !== a.driverId) {
+                    <span class="muted small"> wear {{ s.tyreWearEndPct.toFixed(0) }}%</span>
+                    @if (s.tyreChange > 0) {
+                      <span class="small left" [class.bad]="tyresLeft()[s.index] === '0'" title="Tyres of this compound left for the rest of the race">· {{ tyresLeft()[s.index] }} left</span>
+                    }
+                  </td>
+                }
+                @if (show('ve')) {
+                  <td class="num small">{{ s.veStartPct.toFixed(1) }} → {{ s.veEndPct.toFixed(1) }}%</td>
+                }
+                @if (show('stop')) {
+                  <td class="num" [title]="stopTitle(s)">
+                    @if (s.stop) {
+                      {{ s.stop.totalSec.toFixed(1) }}s
+                      <span class="muted small">+{{ s.stop.refuelPct.toFixed(0) }}%{{ s.stop.tyreCount ? ' · ' + s.stop.tyreCount + ' tyres' : '' }}</span>
+                    } @else {
+                      <span class="muted">Finish</span>
+                    }
+                  </td>
+                }
+                @if (p.live && show('pit')) {
+                  <td>
+                    @if (pitEdit()?.j === s.index) {
+                      @let e = pitEdit()!;
+                      <span class="pit-edit">
+                        <span class="row nowrap">
+                          <input type="time" step="1" [ngModel]="e.time" (ngModelChange)="pitTimeChanged(e, $event)" title="Real pit-in time" />
+                          <button class="btn sm ghost" (click)="pitNow(e)" title="Use the current time">Now</button>
+                        </span>
+                        <span class="row nowrap">
+                          <input type="number" min="1" class="laps" [ngModel]="e.laps" (ngModelChange)="pitEdit.set({ j: e.j, time: e.time, laps: $event })" title="Laps actually run in this stint" />
+                          <span class="muted small">laps</span>
+                          <button class="btn sm primary" (click)="savePitIn(e)">Save</button>
+                          <button class="btn sm ghost" (click)="pitEdit.set(null)" title="Cancel">✕</button>
+                        </span>
+                        <span class="muted small">{{ pitPreview(e) }}</span>
+                      </span>
+                    } @else if (canPitIn(s.index)) {
+                      <button class="btn sm" (click)="openPitIn(s)" title="The car pitted at a different time than planned">
+                        {{ done ? 'Edit ' + clock(s.endSec) : 'Pit in…' }}
+                      </button>
+                    } @else {
+                      <span class="muted small num">{{ clock(s.endSec) }}</span>
+                    }
+                  </td>
+                }
+                @if (show('driver')) {
+                  <td>
+                    <span class="row nowrap">
+                      <span class="dot" [style.background]="driver(a.driverId)?.color ?? 'transparent'"></span>
+                      <select [ngModel]="a.driverId" (ngModelChange)="setDriver(s.index, $event)" [disabled]="done">
+                        <option [ngValue]="null">—</option>
+                        @for (drv of d.drivers; track drv.id) {
                           <option [ngValue]="drv.id">{{ drv.name }}</option>
                         }
+                      </select>
+                      @if (!done) {
+                        <button class="lock" [class.on]="a.driverLocked" (click)="toggleLock(s.index, 'driver')" title="Lock driver">
+                          {{ a.driverLocked ? '🔒' : '🔓' }}
+                        </button>
                       }
-                    </select>
-                    <button class="lock" [class.on]="a.spotterLocked" (click)="toggleLock(s.index, 'spotter')" title="Lock spotter">
-                      {{ a.spotterLocked ? '🔒' : '🔓' }}
-                    </button>
-                  </span>
-                </td>
-                <td>
-                  <span class="avail">
-                    @for (drv of d.drivers; track drv.id; let i = $index) {
-                      <button
-                        class="cell {{ avail()[s.index][i] }}"
-                        [style.borderColor]="drv.color"
-                        [title]="drv.name + ': ' + avail()[s.index][i]"
-                        (click)="cycleAvailability(s.index, drv)"
-                      >{{ i + 1 }}</button>
-                    }
-                  </span>
-                </td>
-                <td>
-                  <span class="row nowrap" (change)="overrideChanged()" (input)="overrideChanged()">
-                    <input type="number" min="1" class="laps" [(ngModel)]="o.lockedLaps" placeholder="laps" title="Lock stint length" />
-                    <select [(ngModel)]="o.tyreAction" title="Tyres at the start of this stint">
-                      <option value="auto">Tyres: auto</option>
-                      <option value="four">4 new tyres</option>
-                      <option value="two">2 new tyres</option>
-                      <option value="keep">Keep tyres</option>
-                    </select>
-                    <select [(ngModel)]="o.compoundId" title="Compound">
-                      <option [ngValue]="null">Any</option>
-                      @for (t of d.tyres; track t.id) {
-                        <option [ngValue]="t.id">{{ t.name }}</option>
+                    </span>
+                  </td>
+                }
+                @if (show('spotter')) {
+                  <td>
+                    <span class="row nowrap">
+                      <select [ngModel]="a.spotterId" (ngModelChange)="setSpotter(s.index, $event)" [disabled]="done">
+                        <option [ngValue]="null">—</option>
+                        @for (drv of d.drivers; track drv.id) {
+                          @if (drv.id !== a.driverId) {
+                            <option [ngValue]="drv.id">{{ drv.name }}</option>
+                          }
+                        }
+                      </select>
+                      @if (!done) {
+                        <button class="lock" [class.on]="a.spotterLocked" (click)="toggleLock(s.index, 'spotter')" title="Lock spotter">
+                          {{ a.spotterLocked ? '🔒' : '🔓' }}
+                        </button>
                       }
-                    </select>
-                    @if (hasOverride(s.index)) {
-                      <button class="btn sm ghost" (click)="clearOverride(s.index)" title="Clear overrides">✕</button>
+                    </span>
+                  </td>
+                }
+                @if (show('avail')) {
+                  <td>
+                    <span class="avail">
+                      @for (drv of d.drivers; track drv.id; let i = $index) {
+                        <button
+                          class="cell {{ avail()[s.index][i] }}"
+                          [style.borderColor]="drv.color"
+                          [title]="drv.name + ': ' + avail()[s.index][i]"
+                          (click)="cycleAvailability(s.index, drv)"
+                        >{{ i + 1 }}</button>
+                      }
+                    </span>
+                  </td>
+                }
+                @if (show('overrides')) {
+                  <td>
+                    @if (done) {
+                      <span class="muted small">Run</span>
+                    } @else {
+                    <span class="row nowrap" (change)="overrideChanged()" (input)="overrideChanged()">
+                      <input type="number" min="1" class="laps" [(ngModel)]="o.lockedLaps" placeholder="laps" title="Lock stint length" />
+                      <select [(ngModel)]="o.tyreAction" title="Tyres at the start of this stint">
+                        <option value="auto">Tyres: auto</option>
+                        <option value="four">4 new tyres</option>
+                        <option value="two">2 new tyres</option>
+                        <option value="keep">Keep tyres</option>
+                      </select>
+                      <select [(ngModel)]="o.compoundId" title="Compound">
+                        <option [ngValue]="null">Any</option>
+                        @for (t of d.tyres; track t.id) {
+                          <option [ngValue]="t.id">{{ t.name }}</option>
+                        }
+                      </select>
+                      @if (hasOverride(s.index)) {
+                        <button class="btn sm ghost" (click)="clearOverride(s.index)" title="Clear overrides">✕</button>
+                      }
+                    </span>
                     }
-                  </span>
-                </td>
+                  </td>
+                }
               </tr>
             }
           </tbody>

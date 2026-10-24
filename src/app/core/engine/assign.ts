@@ -98,6 +98,11 @@ interface Ctx {
   targets: number[];
 }
 
+/** Penalty for each driver change: the driver stays in unless balance, limits or availability matter more. */
+const CHANGE = 400;
+/** Bonus per minute driven and per priority level: decides who gets the extra time when it cannot be split equally. */
+const PRIORITY = 4;
+
 /** Lower is better. Drivers given as index into inp.drivers, -1 = nobody. */
 function cost(ctx: Ctx, drv: number[]): number {
   const { inp, plan, avail, targets } = ctx;
@@ -113,9 +118,9 @@ function cost(ctx: Ctx, drv: number[]): number {
     time[d] += plan.stints[j].driveSec;
     if (avail[j][d] === 'unavailable') c += HARD;
     else if (avail[j][d] === 'preferred') c -= 5;
-    if (j > 0 && drv[j - 1] !== d) c += 0.5;
+    if (j > 0 && drv[j - 1] >= 0 && drv[j - 1] !== d) c += CHANGE;
   }
-  // consecutive stints and rest between blocks
+  // consecutive stints and rest between runs
   const lastEnd = new Array(n).fill(-Infinity);
   for (let j = 0; j < drv.length; ) {
     const d = drv[j];
@@ -132,34 +137,36 @@ function cost(ctx: Ctx, drv: number[]): number {
     }
     j = k + 1;
   }
+  const lowest = Math.max(...inp.drivers.map((d) => d.priority ?? 1));
   for (let i = 0; i < n; i++) {
     const driver = inp.drivers[i];
     const dev = (time[i] - targets[i]) / 60;
     c += dev * dev;
+    c -= PRIORITY * (lowest - (driver.priority ?? 1)) * (time[i] / 60);
     if (driver.maxDriveMin != null && time[i] > driver.maxDriveMin * 60) c += SOFT * (1 + (time[i] - driver.maxDriveMin * 60) / 60);
     if (driver.minDriveMin != null && time[i] < driver.minDriveMin * 60) c += SOFT * (1 + (driver.minDriveMin * 60 - time[i]) / 60);
   }
   return c;
 }
 
-/** Stint ranges [from, to] driven by one driver. A new block starts at each 4-tyre change. */
-export function tyreBlocks(plan: PlanResult): [number, number][] {
+/** Maximal ranges [from, to] of stints driven by the same driver. */
+function runs(drv: number[]): [number, number][] {
   const out: [number, number][] = [];
-  plan.stints.forEach((s, j) => {
-    if (j === 0 || s.tyreChange === 4) out.push([j, j]);
-    else out[out.length - 1][1] = j;
+  drv.forEach((d, j) => {
+    if (j > 0 && drv[j - 1] === d) out[out.length - 1][1] = j;
+    else out.push([j, j]);
   });
   return out;
 }
 
-export function blockIndex(blocks: [number, number][], j: number): number {
-  return blocks.findIndex(([from, to]) => j >= from && j <= to);
-}
-
-/** Assigns drivers (equal driving time, one driver per tyre block) then spotters. Locked assignments are kept. */
+/**
+ * Assigns drivers (equal driving time, as few driver changes as possible) then spotters. Locked assignments are kept.
+ * A driver can change at any stop, with or without new tyres.
+ */
 export function assignCrew(inp: StrategyInputs, plan: PlanResult): StintAssignment[] {
   const S = plan.stints.length;
   const drivers = inp.drivers;
+  const n = drivers.length;
   const ids = drivers.map((d) => d.id);
   const prev = Array.from({ length: S }, (_, j) => {
     const a = inp.assignments[j] ?? emptyAssignment();
@@ -169,79 +176,89 @@ export function assignCrew(inp: StrategyInputs, plan: PlanResult): StintAssignme
       spotterId: a.spotterId && ids.includes(a.spotterId) ? a.spotterId : null,
     };
   });
-  if (!drivers.length) return prev.map(() => emptyAssignment());
+  if (!n) return prev.map(() => emptyAssignment());
 
   const avail = availabilityMatrix(inp, plan);
   const ctx: Ctx = { inp, plan, avail, targets: driveTargets(inp, plan, avail) };
-  // Drivers only change when tyres are changed: one driver per tyre block.
-  const blocks = tyreBlocks(plan);
-  const B = blocks.length;
-  const lockedBlock = blocks.map(([from, to]) => {
-    for (let j = from; j <= to; j++) if (prev[j].driverLocked && prev[j].driverId) return ids.indexOf(prev[j].driverId!);
-    return -1;
-  });
-  const locked = lockedBlock.map((d) => d >= 0);
-  const blk = lockedBlock.slice();
-  const drv = new Array<number>(S).fill(-1);
-  const expand = () => blocks.forEach(([from, to], b) => drv.fill(blk[b], from, to + 1));
+  const locked = prev.map((a) => a.driverLocked && !!a.driverId);
+  const drv = prev.map((a, j) => (locked[j] ? ids.indexOf(a.driverId!) : -1));
 
-  // greedy: give each block to the driver that brings the crew closest to the targets
-  for (let b = 0; b < B; b++) {
-    if (locked[b]) continue;
-    let best = -1;
+  // start from runs as long as the drivers allow, each given to the driver that suits the crew best
+  const limits = drivers.map((d) => d.maxConsecutiveStints).filter((l) => l > 0);
+  const chunk = limits.length ? Math.min(...limits) : Math.max(1, Math.ceil(S / n));
+  for (let from = 0; from < S; from += chunk) {
+    const free = Array.from({ length: Math.min(chunk, S - from) }, (_, k) => from + k).filter((j) => !locked[j]);
+    if (!free.length) continue;
+    let best = 0;
     let bestCost = Infinity;
-    for (let d = 0; d < drivers.length; d++) {
-      blk[b] = d;
-      expand();
-      const tentative = cost(ctx, drv);
-      if (tentative < bestCost) {
-        bestCost = tentative;
+    for (let d = 0; d < n; d++) {
+      for (const j of free) drv[j] = d;
+      const c = cost(ctx, drv);
+      if (c < bestCost) {
+        bestCost = c;
         best = d;
       }
     }
-    blk[b] = best;
+    for (const j of free) drv[j] = best;
   }
-  expand();
 
-  // local search: single moves and swaps until no improvement
-  const tryCost = () => {
-    expand();
-    return cost(ctx, drv);
+  // local search: move one stint (shifts a change to another stop), swap two stints, move a whole run,
+  // swap two runs, swap two drivers everywhere
+  let current = cost(ctx, drv);
+  const attempt = (stints: number[], to: number[]) => {
+    const old = stints.map((j) => drv[j]);
+    stints.forEach((j, k) => (drv[j] = to[k]));
+    const c = cost(ctx, drv);
+    if (c < current - 1e-9) {
+      current = c;
+      return true;
+    }
+    stints.forEach((j, k) => (drv[j] = old[k]));
+    return false;
   };
-  let current = tryCost();
+  const freeRange = ([from, to]: [number, number]) =>
+    Array.from({ length: to - from + 1 }, (_, k) => from + k).filter((j) => !locked[j]);
   for (let pass = 0; pass < 50; pass++) {
     let improved = false;
-    for (let b = 0; b < B; b++) {
-      if (locked[b]) continue;
-      for (let d = 0; d < drivers.length; d++) {
-        if (d === blk[b]) continue;
-        const old = blk[b];
-        blk[b] = d;
-        const c = tryCost();
-        if (c < current - 1e-9) {
-          current = c;
-          improved = true;
-        } else blk[b] = old;
+    for (let j = 0; j < S; j++) {
+      if (locked[j]) continue;
+      for (let d = 0; d < n; d++) if (d !== drv[j] && attempt([j], [d])) improved = true;
+    }
+    for (const r of runs(drv)) {
+      const free = freeRange(r);
+      if (!free.length) continue;
+      for (let d = 0; d < n; d++) if (d !== drv[free[0]] && attempt(free, free.map(() => d))) improved = true;
+    }
+    for (let j = 0; j < S; j++) {
+      if (locked[j]) continue;
+      for (let k = j + 1; k < S; k++) {
+        if (!locked[k] && drv[j] !== drv[k] && attempt([j, k], [drv[k], drv[j]])) improved = true;
       }
     }
-    for (let b = 0; b < B; b++) {
-      if (locked[b]) continue;
-      for (let k = b + 1; k < B; k++) {
-        if (locked[k] || blk[b] === blk[k]) continue;
-        [blk[b], blk[k]] = [blk[k], blk[b]];
-        const c = tryCost();
-        if (c < current - 1e-9) {
-          current = c;
-          improved = true;
-        } else [blk[b], blk[k]] = [blk[k], blk[b]];
+    for (let x = 0; x < n; x++) {
+      for (let y = x + 1; y < n; y++) {
+        const sx = drv.flatMap((d, j) => (d === x && !locked[j] ? [j] : []));
+        const sy = drv.flatMap((d, j) => (d === y && !locked[j] ? [j] : []));
+        if ((sx.length || sy.length) && attempt([...sx, ...sy], [...sx.map(() => y), ...sy.map(() => x)])) improved = true;
+      }
+    }
+    const all = runs(drv);
+    for (let a = 0; a < all.length; a++) {
+      for (let b = a + 1; b < all.length; b++) {
+        const fa = freeRange(all[a]);
+        const fb = freeRange(all[b]);
+        if (!fa.length || !fb.length) continue;
+        const da = drv[fa[0]];
+        const db = drv[fb[0]];
+        if (da === db) continue;
+        if (attempt([...fa, ...fb], [...fa.map(() => db), ...fb.map(() => da)])) improved = true;
       }
     }
     if (!improved) break;
   }
-  expand();
 
   // spotters: least time on duty, prefer the next driver then the previous one
-  const duty = new Array(drivers.length).fill(0);
+  const duty = new Array(n).fill(0);
   drv.forEach((d, j) => d >= 0 && (duty[d] += plan.stints[j].driveSec));
   const spot = prev.map((a) => (a.spotterLocked && a.spotterId ? ids.indexOf(a.spotterId) : -1));
   spot.forEach((s, j) => s >= 0 && (duty[s] += plan.stints[j].driveSec));
@@ -249,7 +266,7 @@ export function assignCrew(inp: StrategyInputs, plan: PlanResult): StintAssignme
     if (prev[j].spotterLocked && spot[j] >= 0) continue;
     let best = -1;
     let bestScore = Infinity;
-    for (let d = 0; d < drivers.length; d++) {
+    for (let d = 0; d < n; d++) {
       if (d === drv[j] || !drivers[d].canSpot || avail[j][d] === 'unavailable') continue;
       let score = duty[d];
       if (drv[j + 1] === d) score -= 1800;
@@ -266,7 +283,7 @@ export function assignCrew(inp: StrategyInputs, plan: PlanResult): StintAssignme
   return prev.map((a, j) => ({
     driverId: drv[j] >= 0 ? ids[drv[j]] : null,
     spotterId: spot[j] >= 0 ? ids[spot[j]] : null,
-    driverLocked: locked[blockIndex(blocks, j)],
+    driverLocked: locked[j],
     spotterLocked: a.spotterLocked && spot[j] >= 0,
   }));
 }
@@ -309,8 +326,6 @@ export function crewIssues(inp: StrategyInputs, plan: PlanResult): string[] {
     }
     const i = byId.get(a.driverId)!;
     if (avail[j][i] === 'unavailable') issues.push(`Stint ${j + 1}: ${inp.drivers[i].name} is unavailable.`);
-    if (j > 0 && s.tyreChange !== 4 && inp.assignments[j - 1]?.driverId !== a.driverId)
-      issues.push(`Stint ${j + 1}: driver change without a 4-tyre change.`);
     if (a.spotterId && a.spotterId === a.driverId) issues.push(`Stint ${j + 1}: driver and spotter are the same person.`);
     if (a.spotterId) {
       const si = byId.get(a.spotterId)!;

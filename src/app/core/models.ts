@@ -74,6 +74,8 @@ export interface Driver {
   maxDriveMin: number | null;
   maxConsecutiveStints: number;
   minRestMin: number;
+  /** 1 = highest. When driving time cannot be split equally, higher-priority drivers get the extra time. */
+  priority: number;
   availability: AvailabilityWindow[];
 }
 
@@ -150,6 +152,13 @@ export interface PlanResult {
   tyresUsed: Partial<Record<string, number>>;
   warnings: string[];
   computedAt: string;
+  /** Set once the race has started. */
+  live?: LiveState | null;
+}
+
+export interface LiveState {
+  /** The first stints, already run: their real times are kept and they are never recomputed. */
+  lockedStints: number;
 }
 
 export interface StrategyVersion {
