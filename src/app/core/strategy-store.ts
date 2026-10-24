@@ -3,10 +3,10 @@ import { AvailabilityRow, CloudRepo, ConflictError, LiveChannel, overlayAvailabi
 import { Supabase } from './cloud/supabase';
 import { db } from './db';
 import { defaultInputs, tyresForCategory } from './defaults';
-import { assignCrew } from './engine/assign';
-import { computeStrategy, retime } from './engine/strategy';
+import { assignCrew, emptyAssignment } from './engine/assign';
+import { computeStrategy, lockedCount, recordPitIn, replanFrom, retime } from './engine/strategy';
 import { Driver, StrategyInputs, StrategyRecord, StrategyVersion } from './models';
-import { clone, uid } from './util';
+import { clockAt, clone, uid } from './util';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Legacy = any;
@@ -28,6 +28,7 @@ function migrateInputs(inp: StrategyInputs): void {
     delete race.tyreChangeSec;
   }
   for (const o of inp.overrides as Legacy[]) if (o?.tyreAction === 'fresh') o.tyreAction = 'four';
+  for (const d of inp.drivers) d.priority ??= 1;
 }
 
 function migratePlan(plan: Legacy): void {
@@ -48,6 +49,15 @@ export function migrate(rec: StrategyRecord): void {
     migrateInputs(v.inputs);
     migratePlan(v.plan);
   });
+}
+
+/** The crew of stints already run is kept by the crew assignment. */
+function lockPast(inp: StrategyInputs, locked: number): void {
+  for (let j = 0; j < locked; j++) {
+    const a = (inp.assignments[j] ??= emptyAssignment());
+    if (a.driverId) a.driverLocked = true;
+    if (a.spotterId) a.spotterLocked = true;
+  }
 }
 
 function errorText(e: unknown): string {
@@ -299,19 +309,57 @@ export class StrategyStore {
     );
   }
 
-  /** Full recalculation (stints + crew), saved as a new version. */
-  calculate(label = 'Recalculated'): boolean {
+  /**
+   * Full recalculation (stints + crew), saved as a new version.
+   * Once the race has started, only the stints after the locked ones are planned again.
+   */
+  calculate(label?: string): boolean {
     const rec = this.current();
     if (!rec) return false;
     try {
-      let plan = computeStrategy(rec.draft);
+      const locked = rec.plan ? lockedCount(rec.plan) : 0;
+      let plan = rec.plan?.live ? replanFrom(rec.draft, rec.plan, locked) : computeStrategy(rec.draft);
+      lockPast(rec.draft, locked);
       rec.draft.assignments = assignCrew(rec.draft, plan);
       rec.draft.overrides = rec.draft.overrides.slice(0, plan.stints.length);
       plan = retime(plan, rec.draft);
       rec.plan = plan;
       rec.dirty = false;
       this.error.set(null);
-      this.pushVersion(rec, label);
+      this.pushVersion(rec, label ?? (locked ? `Re-planned from stint ${locked + 1}` : 'Recalculated'));
+      return true;
+    } catch (e) {
+      this.error.set(errorText(e));
+      return false;
+    }
+  }
+
+  // ------------------------------------------------------------- race mode
+
+  startRace(): void {
+    const rec = this.current();
+    if (!rec?.plan) return;
+    rec.plan.live = { lockedStints: 0 };
+    this.pushVersion(rec, 'Race started');
+  }
+
+  /** Back to planning: the stints are no longer locked (the real times stay in the plan). */
+  stopRace(): void {
+    const rec = this.current();
+    if (!rec?.plan) return;
+    rec.plan.live = null;
+    this.pushVersion(rec, 'Race mode off');
+  }
+
+  /** Stint `j` really ended at `endSec` (race clock) after `laps` laps: lock it and shift the rest of the plan. */
+  pitIn(j: number, endSec: number, laps: number): boolean {
+    const rec = this.current();
+    if (!rec?.plan) return false;
+    try {
+      rec.plan = recordPitIn(rec.draft, rec.plan, j, endSec, laps);
+      lockPast(rec.draft, j + 1);
+      this.error.set(null);
+      this.pushVersion(rec, `Stint ${j + 1} pit-in at ${clockAt(rec.draft.race.startTime, endSec)} (${laps} laps)`);
       return true;
     } catch (e) {
       this.error.set(errorText(e));
@@ -323,6 +371,7 @@ export class StrategyStore {
   rebalanceCrew(): void {
     const rec = this.current();
     if (!rec?.plan) return;
+    lockPast(rec.draft, lockedCount(rec.plan));
     rec.draft.assignments = assignCrew(rec.draft, rec.plan);
     rec.plan = retime(rec.plan, rec.draft);
     this.pushVersion(rec, 'Crew re-balanced');

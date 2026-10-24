@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { defaultInputs, newTyre } from '../defaults';
 import { StrategyInputs } from '../models';
-import { computeStrategy, retime } from './strategy';
+import { computeStrategy, finishGapSec, recordPitIn, replanFrom, retime } from './strategy';
 
 function simple(): StrategyInputs {
   const inp = defaultInputs();
@@ -88,28 +88,22 @@ describe('computeStrategy', () => {
     expect(plan.stints[2].tyreChange).toBe(0);
   });
 
-  it('retime removes driver swap time when the same driver stays in', () => {
+  it('retime adds driver swap time only where the driver changes', () => {
     const inp = simple();
     inp.race.serviceParallel = false;
     const plan = computeStrategy(inp);
-    inp.assignments = plan.stints.map(() => ({ driverId: 'a', spotterId: null, driverLocked: false, spotterLocked: false }));
+    inp.assignments = plan.stints.map((_, j) => ({
+      driverId: j < 5 ? 'a' : 'b',
+      spotterId: null,
+      driverLocked: false,
+      spotterLocked: false,
+    }));
     const re = retime(plan, inp);
-    const tyreStops = plan.stints.filter((s) => s.stop?.tyreCount === 4).length;
-    expect(re.totalSec).toBeCloseTo(plan.totalSec - tyreStops * inp.race.driverChangeSec, 6);
+    expect(re.stints.filter((s) => s.stop?.driverChange).map((s) => s.index)).toEqual([4]);
+    expect(re.totalSec).toBeCloseTo(plan.totalSec + inp.race.driverChangeSec, 6);
   });
 
-  it('only counts driver change time at 4-tyre stops', () => {
-    const inp = simple();
-    inp.race.serviceParallel = false;
-    inp.race.tyreChange4Sec = 30;
-    inp.race.tyreChange2Sec = 25;
-    inp.tyres[0].degSecPerLap = 0.01;
-    const plan = computeStrategy(inp);
-    expect(plan.stints.some((s) => s.stop && !s.stop.tyreCount)).toBe(true);
-    for (const s of plan.stints) if (s.stop) expect(s.stop.driverChange).toBe(s.stop.tyreCount === 4);
-  });
-
-  it('changes tyres at least every max-stints-in-a-row so a driver can get out', () => {
+  it('keeps tyres over many stints when changing them costs time (drivers can change anyway)', () => {
     const inp = simple();
     inp.race.serviceParallel = false;
     inp.race.tyreChange4Sec = 30;
@@ -117,11 +111,19 @@ describe('computeStrategy', () => {
     inp.tyres[0].degSecPerLap = 0.001;
     inp.drivers.forEach((d) => (d.maxConsecutiveStints = 2));
     const plan = computeStrategy(inp);
-    let run = 0;
-    for (const s of plan.stints) {
-      run = s.tyreChange === 4 ? 1 : run + 1;
-      expect(run).toBeLessThanOrEqual(2);
-    }
+    expect(plan.stints.filter((s) => s.tyreChange === 4).length).toBe(1);
+  });
+
+  it('never runs out of wet tyres', () => {
+    const inp = defaultInputs();
+    inp.race.weather = [{ id: 'w', fromMin: 0, toMin: 360, weather: 'wet' }];
+    const wet = inp.tyres.find((t) => t.weather === 'wet')!;
+    wet.tyres = 0;
+    wet.degSecPerLap = 0.5;
+    const plan = computeStrategy(inp);
+    expect(plan.stints.every((s) => s.compoundName === 'Wet')).toBe(true);
+    expect(plan.tyresUsed['Wet']).toBeGreaterThan(8);
+    expect(plan.warnings).toEqual([]);
   });
 
   it('changes only 2 tyres when tyres are short and 2 tyres are quick', () => {
@@ -156,5 +158,89 @@ describe('computeStrategy', () => {
     const plan = computeStrategy(inp);
     expect(plan.totalLaps).toBeGreaterThan(600);
     expect(performance.now() - t0).toBeLessThan(5000);
+  });
+});
+
+describe('race mode', () => {
+  function started(): { inp: StrategyInputs; plan: ReturnType<typeof computeStrategy> } {
+    const inp = defaultInputs();
+    const plan = { ...computeStrategy(inp), live: { lockedStints: 0 } };
+    return { inp, plan };
+  }
+
+  it('locks the stints up to an early pit-in and shifts the next ones', () => {
+    const { inp, plan } = started();
+    const s = plan.stints[2];
+    const early = s.endSec - 5 * s.avgLapSec;
+    const res = recordPitIn(inp, plan, 2, early, s.laps - 5);
+    expect(res.live!.lockedStints).toBe(3);
+    expect(res.stints.slice(0, 2)).toEqual(plan.stints.slice(0, 2));
+    expect(res.stints[2].endSec).toBeCloseTo(early, 6);
+    expect(res.stints[2].laps).toBe(s.laps - 5);
+    expect(res.stints[3].startLap).toBe(res.stints[2].endLap + 1);
+    expect(res.stints[3].laps).toBe(plan.stints[3].laps);
+    expect(res.stints[3].tyreChange).toBe(plan.stints[3].tyreChange);
+    // more VE left in the tank: shorter refuel, the next stint starts as planned
+    expect(res.stints[2].stop!.refuelPct).toBeLessThan(s.stop!.refuelPct);
+    expect(res.stints[3].veStartPct).toBeCloseTo(plan.stints[3].veStartPct, 6);
+    expect(res.stints[3].startSec).toBeCloseTo(early + res.stints[2].stop!.totalSec, 6);
+    expect(res.totalLaps).toBe(plan.totalLaps - 5);
+    expect(finishGapSec(inp, res)).toBeLessThan(0);
+  });
+
+  it('re-plans after the locked stints and keeps them untouched', () => {
+    const { inp, plan } = started();
+    const s = plan.stints[2];
+    const pitted = recordPitIn(inp, plan, 2, s.endSec - 5 * s.avgLapSec, s.laps - 5);
+    const re = replanFrom(inp, pitted, 3);
+    const D = inp.race.durationMin * 60;
+    expect(re.live!.lockedStints).toBe(3);
+    for (let j = 0; j < 3; j++) {
+      const { stop: _a, ...a } = re.stints[j];
+      const { stop: _b, ...b } = pitted.stints[j];
+      expect(a).toEqual(b);
+    }
+    re.stints.forEach((st, j) => expect(st.index).toBe(j));
+    const first = re.stints[3];
+    expect(first.startLap).toBe(pitted.stints[2].endLap + 1);
+    expect(first.startSec).toBeCloseTo(pitted.stints[2].endSec + re.stints[2].stop!.totalSec, 6);
+    expect(first.veStartPct).toBeCloseTo(pitted.stints[2].veEndPct + re.stints[2].stop!.refuelPct, 6);
+    // fits the clock again
+    const last = re.stints[re.stints.length - 1];
+    expect(re.totalSec).toBeGreaterThanOrEqual(D);
+    expect(re.totalSec - last.avgLapSec * 1.5).toBeLessThan(D);
+    // tyres used before the pit are counted
+    const total = Object.values(re.tyresUsed).reduce((a, n) => a! + n!, 0)!;
+    expect(total).toBe(re.stints.reduce((a, st) => a + st.tyreChange, 0));
+  });
+
+  it('continues on the tyres on the car when they are kept', () => {
+    const inp = simple();
+    inp.race.serviceParallel = false;
+    inp.race.tyreChange4Sec = 30;
+    inp.race.tyreChange2Sec = 25;
+    inp.tyres[0].degSecPerLap = 0.001;
+    const plan = { ...computeStrategy(inp), live: { lockedStints: 0 } };
+    const pitted = recordPitIn(inp, plan, 1, plan.stints[1].endSec, plan.stints[1].laps);
+    const re = replanFrom(inp, pitted, 2);
+    expect(re.totalLaps).toBe(100);
+    expect(re.stints[2].tyreChange).toBe(0);
+    expect(re.stints[2].tyreAgeOld).toBe(re.stints[1].tyreAgeOld + re.stints[1].laps);
+  });
+
+  it('retime keeps the real times of locked stints', () => {
+    const { inp, plan } = started();
+    const s = plan.stints[1];
+    const pitted = recordPitIn(inp, plan, 1, s.endSec + 120, s.laps);
+    inp.assignments = pitted.stints.map(() => ({ driverId: 'x', spotterId: null, driverLocked: false, spotterLocked: false }));
+    const re = retime(pitted, inp);
+    expect(re.stints[1].endSec).toBeCloseTo(s.endSec + 120, 6);
+    expect(re.stints[0].startSec).toBe(0);
+    expect(re.stints[2].startSec).toBeCloseTo(re.stints[1].endSec + re.stints[1].stop!.totalSec, 6);
+  });
+
+  it('refuses a pit-in before the stint starts', () => {
+    const { inp, plan } = started();
+    expect(() => recordPitIn(inp, plan, 2, plan.stints[2].startSec - 1, 3)).toThrow();
   });
 });

@@ -1,4 +1,4 @@
-import { Component, computed, inject, output } from '@angular/core';
+import { Component, computed, inject, output, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { emptyOverride } from '../../core/defaults';
 import {
@@ -8,11 +8,43 @@ import {
   emptyAssignment,
   setAvailability,
   stintRealRange,
-  tyreBlocks,
 } from '../../core/engine/assign';
-import { Availability, Driver, Stint, StintAssignment, StintOverride } from '../../core/models';
+import { finishGapSec, lockedCount, tyreLimit } from '../../core/engine/strategy';
+import { Availability, Driver, Stint, StintAssignment, StintOverride, TyreCompound } from '../../core/models';
 import { StrategyStore } from '../../core/strategy-store';
-import { clockAt, formatDuration, formatHours, formatLap } from '../../core/util';
+import { clockAt, clockSecAt, formatDuration, formatHours, formatLap, raceSecAt } from '../../core/util';
+
+interface PitInEdit {
+  j: number;
+  time: string;
+  laps: number;
+}
+
+/** Columns of the stints table that can be hidden. */
+const COLUMNS = [
+  { key: 'laps', label: 'Laps' },
+  { key: 'time', label: 'Time' },
+  { key: 'length', label: 'Length' },
+  { key: 'avg', label: 'Avg lap' },
+  { key: 'tyres', label: 'Tyres' },
+  { key: 've', label: 'VE' },
+  { key: 'stop', label: 'Stop after' },
+  { key: 'pit', label: 'Pit in' },
+  { key: 'driver', label: 'Driver' },
+  { key: 'spotter', label: 'Spotter' },
+  { key: 'avail', label: 'Availability' },
+  { key: 'overrides', label: 'Overrides' },
+];
+
+const HIDDEN_KEY = 'sm-hidden-columns';
+
+function readHidden(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? '[]') as string[];
+  } catch {
+    return [];
+  }
+}
 
 const NEXT_STATUS: Record<Availability, Availability> = {
   available: 'preferred',
@@ -51,10 +83,35 @@ export class PlanTab {
     const c = this.ctx();
     return c ? crewIssues(c.d, c.p) : [];
   });
-  protected readonly blocks = computed(() => {
-    const p = this.plan();
-    return p ? tyreBlocks(p) : [];
+  /** Stints already run (race mode). */
+  protected readonly locked = computed(() => {
+    const p = this.rec()?.plan;
+    return p ? lockedCount(p) : 0;
   });
+  /** Race mode: how far the shifted plan finishes from the clock. */
+  protected readonly finishGap = computed(() => {
+    const c = this.ctx();
+    return c?.p.live ? finishGapSec(c.d, c.p) : null;
+  });
+  protected readonly pitEdit = signal<PitInEdit | null>(null);
+  /** Tyres of the fitted compound left for the race after each stint's tyre change. */
+  protected readonly tyresLeft = computed(() => {
+    const r = this.rec();
+    if (!r?.plan) return [];
+    const used = new Map<string, number>();
+    const byId = new Map(r.draft.tyres.map((t) => [t.id, t]));
+    return r.plan.stints.map((s) => {
+      used.set(s.compoundId, (used.get(s.compoundId) ?? 0) + s.tyreChange);
+      const t = byId.get(s.compoundId);
+      if (!t) return '?';
+      const limit = tyreLimit(t);
+      return isFinite(limit) ? String(limit - used.get(s.compoundId)!) : '∞';
+    });
+  });
+
+  protected readonly columns = COLUMNS;
+  /** Hidden columns, remembered in this browser. */
+  protected readonly hidden = signal(new Set(readHidden()));
   protected readonly hours = computed(() => {
     const p = this.plan();
     return p ? Array.from({ length: Math.floor(p.totalSec / 3600) + 1 }, (_, h) => h) : [];
@@ -110,19 +167,11 @@ export class PlanTab {
     ].join('\n');
   }
 
-  /** Stints sharing a set of tyres, hence the same driver. */
-  private block(j: number): number[] {
-    const [from, to] = this.blocks().find(([f, t]) => j >= f && j <= t) ?? [j, j];
-    return Array.from({ length: to - from + 1 }, (_, k) => from + k);
-  }
-
   setDriver(j: number, id: string | null): void {
-    for (const k of this.block(j)) {
-      const a = this.assignment(k);
-      a.driverId = id;
-      a.driverLocked = id != null;
-      if (a.spotterId === id) a.spotterId = null;
-    }
+    const a = this.assignment(j);
+    a.driverId = id;
+    a.driverLocked = id != null;
+    if (a.spotterId === id) a.spotterId = null;
     this.store.crewChanged();
   }
 
@@ -135,15 +184,14 @@ export class PlanTab {
 
   toggleLock(j: number, kind: 'driver' | 'spotter'): void {
     const a = this.assignment(j);
-    if (kind === 'driver') {
-      const lock = !a.driverLocked;
-      for (const k of this.block(j)) this.assignment(k).driverLocked = lock;
-    } else a.spotterLocked = !a.spotterLocked;
+    if (kind === 'driver') a.driverLocked = !a.driverLocked;
+    else a.spotterLocked = !a.spotterLocked;
     this.store.touch(false);
   }
 
   unlockAll(): void {
-    for (const a of this.draft()!.assignments) {
+    // the crew of stints already run stays locked
+    for (const a of this.draft()!.assignments.slice(this.locked())) {
       a.driverLocked = false;
       a.spotterLocked = false;
     }
@@ -167,5 +215,75 @@ export class PlanTab {
 
   setsLeft(name: string, sets: number): number {
     return sets - (this.plan()!.tyresUsed[name] ?? 0);
+  }
+
+  show(key: string): boolean {
+    return !this.hidden().has(key);
+  }
+
+  toggleColumn(key: string): void {
+    const next = new Set(this.hidden());
+    if (!next.delete(key)) next.add(key);
+    this.saveHidden(next);
+  }
+
+  showAllColumns(): void {
+    this.saveHidden(new Set());
+  }
+
+  private saveHidden(hidden: Set<string>): void {
+    this.hidden.set(hidden);
+    try {
+      localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hidden]));
+    } catch {
+      // storage unavailable: the choice only lasts for this page
+    }
+  }
+
+  tyreMax(t: TyreCompound): string {
+    const n = tyreLimit(t);
+    return isFinite(n) ? String(n) : '∞';
+  }
+
+  /** Only the last stint run and the ones after it can still get a real pit-in time. */
+  canPitIn(j: number): boolean {
+    return j >= this.locked() - 1;
+  }
+
+  openPitIn(s: Stint): void {
+    this.pitEdit.set({ j: s.index, time: clockSecAt(this.draft()!.race.startTime, s.endSec), laps: s.laps });
+  }
+
+  private pitSec(e: PitInEdit): number {
+    return raceSecAt(this.draft()!.race.startTime, e.time, this.plan()!.stints[e.j].endSec);
+  }
+
+  /** New pit-in time: estimate the laps run from the stint's average lap. */
+  pitTimeChanged(e: PitInEdit, time: string): void {
+    const s = this.plan()!.stints[e.j];
+    const next = { ...e, time };
+    const sec = this.pitSec(next);
+    if (sec > s.startSec && s.avgLapSec > 0) next.laps = Math.max(1, Math.round((sec - s.startSec) / s.avgLapSec));
+    this.pitEdit.set(next);
+  }
+
+  pitNow(e: PitInEdit): void {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    this.pitTimeChanged(e, `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`);
+  }
+
+  pitPreview(e: PitInEdit): string {
+    const sec = this.pitSec(e);
+    if (isNaN(sec)) return 'Invalid time';
+    const s = this.plan()!.stints[e.j];
+    const delta = sec - s.endSec;
+    return `${delta >= 0 ? '+' : '−'}${this.dur(Math.abs(delta))} vs plan · race clock ${this.dur(sec)}`;
+  }
+
+  savePitIn(e: PitInEdit): void {
+    const sec = this.pitSec(e);
+    if (isNaN(sec)) return;
+    if (this.store.pitIn(e.j, sec, Math.round(e.laps))) this.pitEdit.set(null);
   }
 }

@@ -34,7 +34,9 @@ type Tab = 'setup' | 'drivers' | 'plan' | 'history' | 'me';
           }
           <button class="btn" (click)="exportJson()">Export</button>
           <button class="btn" [disabled]="!rec.plan" (click)="store.saveVersion('Manual save')">Save version</button>
-          <button class="btn primary" (click)="calculate()">Calculate strategy</button>
+          <button class="btn primary" (click)="calculate()">
+            {{ rec.plan?.live?.lockedStints ? 'Re-plan from stint ' + (rec.plan!.live!.lockedStints + 1) : 'Calculate strategy' }}
+          </button>
         </div>
 
         @if (store.error()) {
